@@ -35,10 +35,12 @@ import com.example.goya.ocr.OcrEngine
 import com.example.goya.speech.Speaker
 import com.example.goya.speech.SpeechGate
 import com.example.goya.util.CrashLog
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.guava.await
 import kotlinx.coroutines.plus
+import java.util.concurrent.Executor
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
@@ -142,38 +144,18 @@ fun CameraReaderScreen(ocrEngine: OcrEngine, speaker: Speaker, cues: Cues) {
         }
 
         // A higher analysis resolution dramatically improves OCR on small print.
-        val resolutionSelector = ResolutionSelector.Builder()
-            .setAspectRatioStrategy(AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY)
-            .setResolutionStrategy(
-                ResolutionStrategy(
-                    // 1080p, not 720p. Tesseract needs the letter strokes to be several pixels
-                    // wide; ordinary book or newspaper print at 720p falls below that and comes
-                    // back as digits and fragments. The cost is a slower pass per frame, which
-                    // does not matter when frames are already throttled to one every 450 ms.
-                    Size(1920, 1080),
-                    ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER
-                )
-            )
-            .build()
-
-        val analysis = ImageAnalysis.Builder()
-            .setResolutionSelector(resolutionSelector)
-            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-            .build()
-            .also { useCase ->
-                useCase.setAnalyzer(
-                    analysisExecutor,
-                    OcrAnalyzer(
-                        engine = ocrEngine,
-                        scope = scope + Dispatchers.Default,
-                        intervalMs = ANALYSIS_INTERVAL_MS
-                    ) { text, luma ->
-                        gate.submit(text)
-                        coach.onFrame(hasText = text.isNotBlank(), luma = luma)
-                    }
-                )
-            }
-
+        // A single ResolutionStrategy did not work everywhere: requesting 1080p with
+        // FALLBACK_RULE_CLOSEST_HIGHER throws "No available output size is found" and the whole
+        // camera fails to bind on devices whose nearest supported size to 1080p is BELOW it
+        // (some phones with 720p rear cameras, many emulators, and any virtual camera). The
+        // camera never comes up, no frames ever reach the OCR engine, and the log shows nothing
+        // but empty frames. So: try 1080p first (best for tight print), and if the camera will
+        // not bind at that resolution, rebind at 720p. 720p is still readable for headline-size
+        // print, and a camera that opens beats one that does not.
+        var analysis = buildAnalysis(Size(1920, 1080), analysisExecutor, ocrEngine, scope + Dispatchers.Default, ANALYSIS_INTERVAL_MS) { text, luma ->
+            gate.submit(text)
+            coach.onFrame(hasText = text.isNotBlank(), luma = luma)
+        }
         val camera = try {
             provider.unbindAll()
             provider.bindToLifecycle(
@@ -182,11 +164,21 @@ fun CameraReaderScreen(ocrEngine: OcrEngine, speaker: Speaker, cues: Cues) {
                 preview,
                 analysis
             )
+        } catch (fallbackFailure: Throwable) {
+            Log.w(TAG, "1080p bind failed (${fallbackFailure.message}), retrying at 720p")
+            analysis = buildAnalysis(Size(1280, 720), analysisExecutor, ocrEngine, scope + Dispatchers.Default, ANALYSIS_INTERVAL_MS) { text, luma ->
+                gate.submit(text)
+                coach.onFrame(hasText = text.isNotBlank(), luma = luma)
+            }
+            provider.unbindAll()
+            provider.bindToLifecycle(
+                lifecycleOwner,
+                CameraSelector.DEFAULT_BACK_CAMERA,
+                preview,
+                analysis
+            )
         } catch (c: CancellationException) {
-            throw c
-        } catch (t: Throwable) {
-            Log.e(TAG, "camera binding failed", t)
-            return@LaunchedEffect
+            throw c // let structured cancellation unwind cleanly on dispose
         }
         cameraRef.set(camera)
 
@@ -219,6 +211,34 @@ fun CameraReaderScreen(ocrEngine: OcrEngine, speaker: Speaker, cues: Cues) {
         }
     }
 }
+
+/**
+ * Builds the ImageAnalysis use case at the requested resolution with the shared analyzer.
+ * Kept in a function so the camera can be re-bound at a lower resolution when the first
+ * resolution is unsupported (see the try/catch in [CameraReaderScreen]).
+ */
+private fun buildAnalysis(
+    size: Size,
+    executor: Executor,
+    engine: OcrEngine,
+    scope: CoroutineScope,
+    intervalMs: Long,
+    onResult: (String, Int) -> Unit
+): ImageAnalysis = ImageAnalysis.Builder()
+    .setResolutionSelector(
+        ResolutionSelector.Builder()
+            .setAspectRatioStrategy(AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY)
+            .setResolutionStrategy(ResolutionStrategy(size, ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER))
+            .build()
+    )
+    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+    .build()
+    .also { useCase ->
+        useCase.setAnalyzer(
+            executor,
+            OcrAnalyzer(engine = engine, scope = scope, intervalMs = intervalMs, onResult = onResult)
+        )
+    }
 
 private const val TAG = "CameraReaderScreen"
 private const val ANALYSIS_INTERVAL_MS = 450L
