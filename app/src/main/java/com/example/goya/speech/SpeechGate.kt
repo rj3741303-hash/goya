@@ -25,7 +25,7 @@ import com.example.goya.text.TextNormalizer
 class SpeechGate(
     private val speaker: Speaker,
     private val stableFrames: Int = 2,
-    private val sameThreshold: Float = 0.85f,
+    private val sameThreshold: Float = 0.75f,
     private val changeThreshold: Float = 0.55f,
     private val repeatCooldownMs: Long = 10_000L,
     private val emptyFramesToCancel: Int = 3,

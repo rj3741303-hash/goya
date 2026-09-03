@@ -76,12 +76,15 @@ class TesseractOcrEngine(context: Context) : OcrEngine {
                 Log.e(TAG, "TessBaseAPI.init failed for '$LANG'")
                 return@withContext false
             }
-            // PSM_AUTO, never PSM_AUTO_OSD. "OSD" (orientation and script detection) requires a
-            // separate osd.traineddata file that we do not bundle. When it is missing, libtesseract
-            // does not return false -- it aborts the process with SIGABRT on the first frame it
-            // analyses, which is an uncatchable native crash a fraction of a second after the
-            // camera appears. PSM_AUTO does full page layout analysis without needing osd.
-            api.pageSegMode = TessBaseAPI.PageSegMode.PSM_AUTO
+            // PSM_SINGLE_BLOCK, never PSM_AUTO_OSD. "OSD" (orientation/script detection) needs a
+            // separate osd.traineddata that we do not bundle; when it is missing libtesseract
+            // does not return an error -- it aborts the whole process with SIGABRT on the first
+            // analysed frame. PSM_AUTO is safe but runs a full page-layout analysis on every
+            // frame, which is the single biggest OCR cost. A handheld reader frames one
+            // continuous screenful of text at a time, so the single-block assumption is exactly
+            // right for this app -- and it is measurably faster, which matters because the
+            // user's perception of the app is dominated by how soon the reading starts.
+            api.pageSegMode = TessBaseAPI.PageSegMode.PSM_SINGLE_BLOCK
             api.setVariable("preserve_interword_spaces", "1")
             initialised = true
             Log.i(TAG, "Tesseract ready ('$LANG')")
@@ -115,7 +118,27 @@ class TesseractOcrEngine(context: Context) : OcrEngine {
     override suspend fun recognize(image: ImageProxy): String = withContext(Dispatchers.Default) {
         if (!initialised) return@withContext ""
         if (Stages.isQuarantined(Stages.OCR_FRAME)) return@withContext ""
-        val bitmap = image.toUprightBitmap() ?: return@withContext ""
+        val raw = image.toUprightBitmap() ?: return@withContext ""
+
+        // Tesseract's LSTM model reads large glyphs far better than small ones. CameraX hands us
+        // the smallest configured analysis size, so on modest cameras the text strokes can fall
+        // below what the model resolves cleanly (garbled letters, half words). Scale small frames
+        // up with a native bilinear filter before recognition: it costs a few milliseconds and
+        // consistently raises accuracy on anything but already-large text.
+        val longSide = maxOf(raw.width, raw.height)
+        val bitmap = if (longSide < MIN_LONG_SIDE) {
+            val scale = MIN_LONG_SIDE.toFloat() / longSide
+            val scaled = Bitmap.createScaledBitmap(
+                raw,
+                (raw.width * scale).toInt().coerceAtLeast(1),
+                (raw.height * scale).toInt().coerceAtLeast(1),
+                true // bilinear
+            )
+            if (scaled !== raw && !raw.isRecycled) raw.recycle()
+            scaled
+        } else {
+            raw
+        }
 
         // Only the first pass is marked. Recognition itself is native, and a page-layout or
         // script-data fault shows up on frame one, not frame two hundred.
@@ -227,6 +250,12 @@ class TesseractOcrEngine(context: Context) : OcrEngine {
 
         /** One frame in this many text-free frames is logged, to bound log growth. */
         const val EMPTY_LOG_EVERY = 20
+
+        /**
+         * Longest side (px) that still gets upscaled before recognition. 1280p frames are scaled
+         * ~1.2x, which is enough for Tesseract to resolve small print without a big time cost.
+         */
+        const val MIN_LONG_SIDE = 1600
     }
 }
 

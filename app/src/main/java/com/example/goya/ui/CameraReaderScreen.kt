@@ -79,9 +79,15 @@ fun CameraReaderScreen(ocrEngine: OcrEngine, speaker: Speaker, cues: Cues) {
     val gate = remember {
         SpeechGate(
             speaker = speaker,
-            onSpoke = {
+            onSpoke = { text ->
                 cues.textFound()
                 onboarding.onSentenceSpoken()
+                // Record the moment speech actually starts, so latency is measurable from the
+                // log: the gap between the first matching "ocr frame" line and this line is
+                // the real read-latency.
+                if (gateLogBudget.getAndDecrement() > 0) {
+                    CrashLog.append(context, "gate: spoke chars=${text.length}")
+                }
             },
             onRejected = logGateRejection
         )
@@ -241,5 +247,5 @@ private fun buildAnalysis(
     }
 
 private const val TAG = "CameraReaderScreen"
-private const val ANALYSIS_INTERVAL_MS = 450L
+private const val ANALYSIS_INTERVAL_MS = 250L
 private const val AUTOFOCUS_INTERVAL_MS = 2500L
