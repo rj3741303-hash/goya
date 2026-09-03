@@ -215,8 +215,15 @@ class TesseractOcrEngine(context: Context) : OcrEngine {
          */
         const val MIN_CONFIDENCE = 45
 
-        /** Total number of recognition results written to the on-device log for diagnosis. */
-        const val LOG_BUDGET = 60
+        /**
+         * Total number of recognition results written to the on-device log for diagnosis.
+         *
+         * Generous on purpose. Empty frames consume the budget at one line per
+         * [EMPTY_LOG_EVERY], so a small budget could be spent entirely on empty entries before
+         * the phone is ever aimed at real writing -- the same trap the old "first 8 frames"
+         * logging fell into. 150 keeps the file under ~25 KB while covering a full session.
+         */
+        const val LOG_BUDGET = 150
 
         /** One frame in this many text-free frames is logged, to bound log growth. */
         const val EMPTY_LOG_EVERY = 20

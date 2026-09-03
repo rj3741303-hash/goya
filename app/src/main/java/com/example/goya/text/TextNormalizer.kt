@@ -66,6 +66,32 @@ object TextNormalizer {
         return persian.toFloat() / letters.length
     }
 
+    /**
+     * Why a text frame would be rejected by the speech gate, or null when it would pass.
+     *
+     * This is diagnostics, not a second gate: when the app stays silent despite OCR producing
+     * text, the log must say WHICH condition failed, otherwise "OCR read something" and "the
+     * user heard nothing" look identical from outside. The thresholds are the same ones
+     * [com.example.goya.speech.SpeechGate] applies, passed in so there is exactly one source
+     * of truth for each number.
+     */
+    fun rejectionReason(
+        text: String,
+        minChars: Int,
+        minPersianLetters: Int,
+        minLetterFraction: Float,
+        minPersianRatio: Float
+    ): String? {
+        if (text.length < minChars) return "too-short len=${text.length}"
+        val letters = persianLetterCount(text)
+        if (letters < minPersianLetters) return "few-persian-letters count=$letters"
+        val fraction = letterFraction(text)
+        if (fraction < minLetterFraction) return "mostly-digits fraction=%.2f".format(fraction)
+        val ratio = persianRatio(text)
+        if (ratio < minPersianRatio) return "non-persian-letters ratio=%.2f".format(ratio)
+        return null
+    }
+
     /** Normalised Levenshtein similarity: 0.0 = unrelated, 1.0 = identical. */
     fun similarity(a: String, b: String): Float {
         if (a == b) return 1f

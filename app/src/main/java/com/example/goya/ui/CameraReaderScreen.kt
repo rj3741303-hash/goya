@@ -34,12 +34,14 @@ import com.example.goya.ocr.OcrAnalyzer
 import com.example.goya.ocr.OcrEngine
 import com.example.goya.speech.Speaker
 import com.example.goya.speech.SpeechGate
+import com.example.goya.util.CrashLog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.guava.await
 import kotlinx.coroutines.plus
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.coroutines.cancellation.CancellationException
 
@@ -61,6 +63,16 @@ fun CameraReaderScreen(ocrEngine: OcrEngine, speaker: Speaker, cues: Cues) {
     // handler, so the gate never sees concurrent access.
     val analysisExecutor = remember { Executors.newSingleThreadExecutor() }
 
+    // Budgeted logger for speech-gate rejections. Rejections can happen on every frame while the
+    // camera sweeps across a page, so this is capped: enough lines to name the reason, never
+    // enough to crowd out the OCR lines in the same log file.
+    val gateLogBudget = remember { AtomicInteger(40) }
+    val logGateRejection: (String) -> Unit = { reason ->
+        if (gateLogBudget.getAndDecrement() > 0) {
+            CrashLog.append(context, "gate: rejected $reason")
+        }
+    }
+
     val onboarding = remember { Onboarding(context, speaker, scope) }
     val gate = remember {
         SpeechGate(
@@ -68,7 +80,8 @@ fun CameraReaderScreen(ocrEngine: OcrEngine, speaker: Speaker, cues: Cues) {
             onSpoke = {
                 cues.textFound()
                 onboarding.onSentenceSpoken()
-            }
+            },
+            onRejected = logGateRejection
         )
     }
     val coach = remember {

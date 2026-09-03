@@ -37,7 +37,14 @@ class SpeechGate(
     private val minLetterFraction: Float = 0.55f,
     private val requirePersian: Boolean = true,
     /** Fired on the analysis thread whenever a new sentence starts being read. */
-    private val onSpoke: (String) -> Unit = {}
+    private val onSpoke: (String) -> Unit = {},
+    /**
+     * Fired on the analysis thread with a plain-language reason whenever a NON-BLANK frame is
+     * rejected by the quality filter. The one blind spot in the OCR log: without it, "Tesseract
+     * read something" and "nothing was spoken" look identical from outside. Budgeted by the
+     * caller; keep this cheap because it runs on every rejected frame.
+     */
+    private val onRejected: (String) -> Unit = {}
 ) {
 
     @Volatile private var lastSpokenNorm: String? = null
@@ -69,6 +76,15 @@ class SpeechGate(
             )
 
         if (!usable) {
+            // Blank input is the normal "nothing here" case and is silent. Non-blank input that
+            // still failed the filter is exactly what the log must explain.
+            if (speech.isNotEmpty()) {
+                onRejected(
+                    TextNormalizer.rejectionReason(
+                        speech, minChars, minPersianLetters, minLetterFraction, minPersianRatio
+                    ) ?: "unknown"
+                )
+            }
             onNoText()
             return
         }
