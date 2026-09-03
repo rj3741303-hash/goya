@@ -33,6 +33,29 @@ object TextNormalizer {
         .replace(whitespace, " ")
         .trim()
 
+    /**
+     * Number of Persian/Arabic letters in the text.
+     *
+     * This, not [persianRatio], is what says whether there is real writing here. A frame of OCR
+     * noise such as "۹۱ ۲۱" has a persianRatio of 1.0 the moment it contains two stray letters,
+     * because that ratio only ever looks at characters that are already letters.
+     */
+    fun persianLetterCount(text: String): Int = text.count { ch ->
+        ch.isLetter() && (ch.code in 0x0600..0x06FF || ch.code in 0xFB50..0xFEFF)
+    }
+
+    /**
+     * Fraction of the visible text made up of letters, digits and punctuation included.
+     *
+     * Low values mean the frame is mostly numbers or symbols: a price tag, a page number, or
+     * Tesseract hallucinating on a blurry image. Not worth reading aloud.
+     */
+    fun letterFraction(text: String): Float {
+        val visible = text.count { !it.isWhitespace() }
+        if (visible == 0) return 0f
+        return text.count { it.isLetter() }.toFloat() / visible
+    }
+
     /** Fraction of letters that are Persian/Arabic script. Used to reject noise frames. */
     fun persianRatio(text: String): Float {
         val letters = text.filter { it.isLetter() }

@@ -133,7 +133,11 @@ fun CameraReaderScreen(ocrEngine: OcrEngine, speaker: Speaker, cues: Cues) {
             .setAspectRatioStrategy(AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY)
             .setResolutionStrategy(
                 ResolutionStrategy(
-                    Size(1280, 720),
+                    // 1080p, not 720p. Tesseract needs the letter strokes to be several pixels
+                    // wide; ordinary book or newspaper print at 720p falls below that and comes
+                    // back as digits and fragments. The cost is a slower pass per frame, which
+                    // does not matter when frames are already throttled to one every 450 ms.
+                    Size(1920, 1080),
                     ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER
                 )
             )

@@ -42,6 +42,9 @@ class TesseractOcrEngine(context: Context) : OcrEngine {
     /** How many recognition results have been written to the on-device log so far. */
     private val logged = AtomicInteger(0)
 
+    /** Counts frames that produced no text, so only every Nth one is logged. */
+    private val emptyFrames = AtomicInteger(0)
+
     override val isReady: Boolean get() = initialised
     private val preparing = AtomicBoolean(false)
 
@@ -128,11 +131,20 @@ class TesseractOcrEngine(context: Context) : OcrEngine {
             // the problem is the image (focus, light, script). A healthy chars count with a low
             // confidence means MIN_CONFIDENCE is throwing away real text. To the user both look
             // identical -- silence -- but they need opposite fixes.
-            if (logged.getAndIncrement() < LOG_FIRST_FRAMES) {
+            // Logging the first eight frames was a mistake: those are captured in the seconds
+            // before the phone has been aimed at anything, so the log filled up with "chars=0"
+            // and proved only that the ceiling has no writing on it. Every frame that produces
+            // text is now recorded, plus one empty frame in every EMPTY_LOG_EVERY as a
+            // reference, within a fixed budget so the file stays small.
+            val worthLogging = text.isNotEmpty() ||
+                emptyFrames.getAndIncrement() % EMPTY_LOG_EVERY == 0
+            if (worthLogging && logged.getAndIncrement() < LOG_BUDGET) {
                 CrashLog.append(
                     appContext,
                     "ocr frame: chars=${text.length} confidence=$confidence " +
                         "accepted=${confidence >= MIN_CONFIDENCE} " +
+                        "size=${bitmap.width}x${bitmap.height} " +
+                        "bright=${bitmap.roughBrightness()} " +
                         "sample=${text.take(40).replace("\n", " ")}"
                 )
             }
@@ -151,6 +163,36 @@ class TesseractOcrEngine(context: Context) : OcrEngine {
         }
     }
 
+    /**
+     * Mean intensity of a coarse pixel sample, 0-255, or -1 if it could not be read.
+     *
+     * This separates two failures that look identical from the outside. A value near zero means
+     * the bitmap handed to Tesseract is black, so the fault is in the camera or the frame
+     * conversion. A normal value with `chars=0` means the image is fine and the camera simply
+     * was not pointed at readable writing.
+     */
+    private fun Bitmap.roughBrightness(): Int = runCatching {
+        val stepX = maxOf(1, width / 16)
+        val stepY = maxOf(1, height / 16)
+        var total = 0L
+        var count = 0
+        var y = 0
+        while (y < height) {
+            var x = 0
+            while (x < width) {
+                val pixel = getPixel(x, y)
+                val r = pixel shr 16 and 0xFF
+                val g = pixel shr 8 and 0xFF
+                val b = pixel and 0xFF
+                total += (r + g + b) / 3
+                count++
+                x += stepX
+            }
+            y += stepY
+        }
+        if (count == 0) -1 else (total / count).toInt()
+    }.getOrDefault(-1)
+
     override fun close() {
         initialised = false
         runCatching { api.recycle() }
@@ -162,11 +204,22 @@ class TesseractOcrEngine(context: Context) : OcrEngine {
         /** Use "fas+ara" if you also bundle ara.traineddata for mixed material. */
         const val LANG = "fas"
 
-        /** Tesseract mean confidence (0-100) below which a frame is ignored. */
-        const val MIN_CONFIDENCE = 60
+        /**
+         * Tesseract mean confidence (0-100) below which a frame is ignored.
+         *
+         * Deliberately low. This is a *mean over the whole frame*, so a page whose text is read
+         * perfectly still averages down badly because of margins, shadows and edges caught in
+         * the same image. At 60 real Persian sentences were being thrown away. Junk is now
+         * rejected by SpeechGate on the content of the text instead, which is a far better
+         * signal than an averaged confidence number.
+         */
+        const val MIN_CONFIDENCE = 45
 
-        /** Number of recognition results written to the on-device log for diagnosis. */
-        const val LOG_FIRST_FRAMES = 8
+        /** Total number of recognition results written to the on-device log for diagnosis. */
+        const val LOG_BUDGET = 60
+
+        /** One frame in this many text-free frames is logged, to bound log growth. */
+        const val EMPTY_LOG_EVERY = 20
     }
 }
 

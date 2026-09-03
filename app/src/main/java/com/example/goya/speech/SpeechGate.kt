@@ -31,6 +31,10 @@ class SpeechGate(
     private val emptyFramesToCancel: Int = 3,
     private val minChars: Int = 3,
     private val minPersianRatio: Float = 0.5f,
+    /** Minimum count of real Persian letters. Roughly one short word. */
+    private val minPersianLetters: Int = 4,
+    /** Minimum share of the text that must be letters rather than digits or symbols. */
+    private val minLetterFraction: Float = 0.55f,
     private val requirePersian: Boolean = true,
     /** Fired on the analysis thread whenever a new sentence starts being read. */
     private val onSpoke: (String) -> Unit = {}
@@ -48,8 +52,21 @@ class SpeechGate(
     /** Feed one OCR result. Blank or junk input is treated as "no text". */
     fun submit(rawText: String) {
         val speech = TextNormalizer.forSpeech(rawText)
-        val usable = speech.length >= minChars &&
-            (!requirePersian || TextNormalizer.persianRatio(speech) >= minPersianRatio)
+
+        // Text is judged on how much real Persian writing it contains, not on the makeup of its
+        // letters alone. Checking persianRatio by itself was a design mistake: that ratio is
+        // computed among characters that are already letters, so a frame of digit noise like
+        // "۹۱ ۲۱" scored a perfect 1.0 as soon as two stray letters landed in it, and got read
+        // aloud while genuine sentences were being discarded. Three conditions now apply:
+        // enough Persian letters, letters forming most of the text, and those letters being
+        // Persian rather than Latin.
+        val usable = speech.length >= minChars && (
+            !requirePersian || (
+                TextNormalizer.persianLetterCount(speech) >= minPersianLetters &&
+                    TextNormalizer.letterFraction(speech) >= minLetterFraction &&
+                    TextNormalizer.persianRatio(speech) >= minPersianRatio
+                )
+            )
 
         if (!usable) {
             onNoText()
