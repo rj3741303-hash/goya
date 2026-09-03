@@ -40,7 +40,8 @@ class SpeechGate(
     private val onSpoke: (String) -> Unit = {},
     /**
      * Fired on the analysis thread with a plain-language reason whenever a NON-BLANK frame is
-     * rejected by the quality filter. The one blind spot in the OCR log: without it, "Tesseract
+     * rejected by the quality filter, or whenever an accumulating candidate is discarded before
+     * it stabilised (OCR flicker). The one blind spot in the OCR log: without it, "Tesseract
      * read something" and "nothing was spoken" look identical from outside. Budgeted by the
      * caller; keep this cheap because it runs on every rejected frame.
      */
@@ -109,6 +110,17 @@ class SpeechGate(
                 candidateRaw = speech
             }
         } else {
+            // A candidate that had already accumulated frames is being replaced before it reached
+            // [stableFrames]. That is OCR flicker: the engine keeps reading text, but each frame's
+            // output differs too much from the last for any of it to stabilise, so nothing is ever
+            // spoken and nothing else in the log explains why. This is the last silent path.
+            if (candidateHits in 1 until stableFrames) {
+                onRejected(
+                    "unstable text: a $candidateHits-frame candidate was replaced before it could " +
+                        "be spoken (frames differ by more than ${((1 - sameThreshold) * 100).toInt()}%); " +
+                        "'${candidateRaw.take(30)}' -> '${speech.take(30)}'"
+                )
+            }
             candidateNorm = norm
             candidateRaw = speech
             candidateHits = 1
