@@ -1,0 +1,34 @@
+Place the offline Persian VITS/Piper voice in THIS folder, flattened (no extra subfolder
+except espeak-ng-data):
+
+    app/src/main/assets/tts/fa/
+    ├── fa_IR-amir-medium.onnx      (~30-60 MB, the voice)
+    ├── tokens.txt
+    └── espeak-ng-data/             (phonemiser data, required by Piper voices)
+
+Easiest way: run tools/fetch-tts-model.sh from the project root. It downloads and unpacks
+everything into the right place.
+
+Manual way: grab a Persian TTS model from the Sherpa-ONNX pretrained-model releases, e.g.
+
+    vits-piper-fa_IR-amir-medium      (Piper voice, needs espeak-ng-data)
+    vits-piper-fa_IR-gyro-medium      (alternative Piper voice)
+    vits-mms-fas                      (MMS voice, uses lexicon.txt instead of espeak-ng-data)
+
+    https://github.com/k2-fsa/sherpa-onnx/releases/tag/tts-models
+
+unpack the archive and copy its contents here.
+
+How the app uses it:
+  * SherpaTtsEngine picks the first *.onnx file in this folder, plus tokens.txt.
+  * If espeak-ng-data/ exists it is passed as dataDir (Piper voices).
+  * If lexicon.txt exists it is passed as lexicon (MMS voices).
+  * AssetInstaller copies the whole folder to the app's private files dir on first launch,
+    because the native code needs real filesystem paths. A .installed marker prevents
+    recopying; bump SherpaTtsEngine.MODEL_VERSION whenever you swap the voice.
+  * .onnx is in androidResources.noCompress, so it is stored uncompressed in the APK.
+
+If this folder is empty the app still runs: Speaker falls back to the device's native
+Persian TTS voice, and stays silent if the device has none.
+
+This placeholder file can be deleted once the model is added.

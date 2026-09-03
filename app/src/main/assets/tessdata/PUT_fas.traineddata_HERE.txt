@@ -1,0 +1,18 @@
+Place the Persian Tesseract model in THIS folder as:
+
+    app/src/main/assets/tessdata/fas.traineddata
+
+Recommended (small, fast, ~1-2 MB):
+    https://github.com/tesseract-ocr/tessdata_fast/raw/main/fas.traineddata
+
+More accurate (larger, slower, ~10-15 MB):
+    https://github.com/tesseract-ocr/tessdata_best/raw/main/fas.traineddata
+
+TesseractOcrEngine copies this asset to the app's private files dir on first
+launch. If the file is missing, the engine logs a warning and returns no text
+(the app will run but stay silent).
+
+You may also drop in `ara.traineddata` and change LANG in TesseractOcrEngine.kt
+to "fas+ara" for mixed Persian/Arabic material.
+
+This placeholder file can be deleted once the model is added.

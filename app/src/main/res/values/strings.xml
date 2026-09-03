@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">گویا</string>
+
+    <!-- Spoken prompts. These are never displayed on screen: the user cannot read. -->
+    <string name="spoken_need_camera">برای خواندن نوشته‌ها، اجازه‌ی دسترسی به دوربین را تأیید کنید.</string>
+    <string name="spoken_permission_denied">اجازه‌ی دوربین داده نشد. برنامه نمی‌تواند نوشته‌ها را ببیند.</string>
+    <string name="spoken_ready">گوشی را روی نوشته بگیرید.</string>
+
+    <!-- Escalating hints, spoken while nothing is being recognised. -->
+    <string name="spoken_move_closer">کمی نزدیک‌تر بگیرید.</string>
+    <string name="spoken_hold_steady">گوشی را ثابت نگه دارید.</string>
+    <string name="spoken_more_light">نوشته دیده نمی‌شود. جای روشن‌تری امتحان کنید.</string>
+
+    <string name="spoken_torch_on">چراغ روشن شد.</string>
+
+    <!-- Spoken once, ever, after the first successful reading. Tap-to-repeat has no visual
+         affordance, so the user would never discover it otherwise. -->
+    <string name="spoken_tap_to_repeat">برای شنیدن دوباره، هر جای صفحه را لمس کنید.</string>
+</resources>

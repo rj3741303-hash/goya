@@ -1,0 +1,412 @@
+# Builds a signed, installable APK in the cloud with the offline models baked in.
+#
+# Nothing needs to be installed on your own computer: no JDK, no Android SDK, no Gradle.
+# Push this repository to GitHub, open the Actions tab, run "Build APK", and download the
+# finished APK from the run's Artifacts section.
+#
+# The job deliberately FAILS rather than producing a silent app. If a model cannot be
+# downloaded, or ends up missing from the APK, the verification gate at the end stops the
+# build. A green build here means the models are genuinely inside the APK.
+
+name: Build APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      voice:
+        description: "Persian voice to bundle"
+        type: choice
+        default: vits-piper-fa_IR-amir-medium
+        options:
+          - vits-piper-fa_IR-amir-medium
+          - vits-piper-fa_IR-gyro-medium
+          - vits-mms-fas
+      ocr_quality:
+        description: "Tesseract model: best (accurate, recommended) or fast (smaller)"
+        type: choice
+        default: best
+        options:
+          - best
+          - fast
+      sherpa_aar_url:
+        description: "Optional: direct URL to the Sherpa-ONNX Android AAR (leave empty to auto-detect)"
+        required: false
+        default: ""
+      tesseract_version:
+        description: "Optional: pin tesseract4android version (leave empty to auto-detect latest)"
+        required: false
+        default: ""
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    env:
+      VOICE: ${{ github.event.inputs.voice || 'vits-piper-fa_IR-amir-medium' }}
+      OCR_QUALITY: ${{ github.event.inputs.ocr_quality || 'best' }}
+      SHERPA_AAR_URL: ${{ github.event.inputs.sherpa_aar_url || '' }}
+      TESSERACT_PIN: ${{ github.event.inputs.tesseract_version || '' }}
+      TTS_DIR: app/src/main/assets/tts/fa
+      OCR_DIR: app/src/main/assets/tessdata
+      BUILD_TOOLS: "35.0.0"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: "platforms;android-35 build-tools;35.0.0 platform-tools"
+
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      # The repository intentionally contains no gradle-wrapper.jar (binaries excluded).
+      - name: Generate Gradle wrapper if missing
+        run: |
+          set -euo pipefail
+          if [ ! -f gradle/wrapper/gradle-wrapper.jar ]; then
+            echo "::notice::gradle-wrapper.jar missing, generating wrapper"
+            gradle wrapper --gradle-version 8.9
+          fi
+          chmod +x ./gradlew
+
+      # ----------------------------------------------------------------------------------
+      # 1. Persian OCR model. Without this the app runs but recognises nothing.
+      # ----------------------------------------------------------------------------------
+      - name: Download Tesseract Persian model
+        run: |
+          set -euo pipefail
+          mkdir -p "$OCR_DIR"
+          rm -f "$OCR_DIR"/*.txt
+
+          case "$OCR_QUALITY" in
+            fast) REPO=tessdata_fast ;;
+            *)    REPO=tessdata_best ;;
+          esac
+          URL="https://github.com/tesseract-ocr/$REPO/raw/main/fas.traineddata"
+
+          echo "Downloading $URL"
+          curl -fL --retry 5 --retry-delay 3 -o "$OCR_DIR/fas.traineddata" "$URL"
+
+          # Guard against having saved an HTML error page instead of a model.
+          #
+          # Do NOT gate on a large file size. tessdata_fast models are genuinely small
+          # because they are int8-quantised: Persian is around 420 KB. Only tessdata_best
+          # is several MB. Size alone cannot tell a real model from an error page, so we
+          # inspect the actual bytes and keep the size floor low enough to never reject a
+          # legitimate model.
+          SIZE=$(stat -c%s "$OCR_DIR/fas.traineddata")
+          echo "fas.traineddata = $SIZE bytes"
+
+          if head -c 512 "$OCR_DIR/fas.traineddata" | grep -qaiE '<html|<!doctype|not found|rate limit|xml version'; then
+            echo "::error::The download returned an HTML or error page, not a model. First bytes:"
+            head -c 512 "$OCR_DIR/fas.traineddata" || true
+            exit 1
+          fi
+
+          if [ "$SIZE" -lt 100000 ]; then
+            echo "::error::fas.traineddata is only $SIZE bytes - too small to be any Tesseract model."
+            exit 1
+          fi
+
+          echo "OCR model looks valid."
+
+      # ----------------------------------------------------------------------------------
+      # 2. Offline Persian voice. Without this the app is permanently silent.
+      # ----------------------------------------------------------------------------------
+      - name: Download offline Persian voice
+        run: |
+          set -euo pipefail
+          mkdir -p "$TTS_DIR" .cache
+          rm -f "$TTS_DIR"/*.txt
+
+          BASE="https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models"
+          URL="$BASE/$VOICE.tar.bz2"
+          echo "Downloading $URL"
+          curl -fL --retry 5 --retry-delay 3 -o ".cache/$VOICE.tar.bz2" "$URL"
+          tar -xjf ".cache/$VOICE.tar.bz2" -C .cache
+
+          # CRITICAL: flatten. The engine scans assets/tts/fa itself and will not look
+          # inside a nested folder, which would fail silently at runtime.
+          cp -R ".cache/$VOICE/." "$TTS_DIR/"
+          rm -f "$TTS_DIR"/*.md "$TTS_DIR"/*.onnx.json || true
+
+          echo "Contents of $TTS_DIR:"
+          ls -la "$TTS_DIR"
+
+          if ! ls "$TTS_DIR"/*.onnx >/dev/null 2>&1; then
+            echo "::error::No .onnx voice directly inside $TTS_DIR after extraction."
+            exit 1
+          fi
+          if [ ! -s "$TTS_DIR/tokens.txt" ]; then
+            echo "::error::tokens.txt missing next to the .onnx voice."
+            exit 1
+          fi
+          # Piper voices phonemise via espeak-ng-data; MMS voices use lexicon.txt instead.
+          if [ ! -d "$TTS_DIR/espeak-ng-data" ] && [ ! -s "$TTS_DIR/lexicon.txt" ]; then
+            echo "::error::Neither espeak-ng-data/ nor lexicon.txt present - the voice cannot phonemise Persian."
+            exit 1
+          fi
+
+      # ----------------------------------------------------------------------------------
+      # 3. Sherpa-ONNX Android AAR. Without this the project does not even compile.
+      #
+      #    Asset names change between releases AND the same release publishes several
+      #    hardware-specific variants (rknn for Rockchip NPUs, GPU builds, and so on).
+      #    Those variants carry extra native libraries a phone will never use, so the
+      #    plain sherpa-onnx-<version>.aar is selected explicitly and the others are
+      #    filtered out rather than being picked up by a loose "any .aar" match.
+      # ----------------------------------------------------------------------------------
+      - name: Resolve and download Sherpa-ONNX Android AAR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p app/libs
+          rm -f app/libs/*.txt app/libs/*.aar
+
+          ASSET_FILE=$(mktemp)
+          URL="$SHERPA_AAR_URL"
+
+          if [ -z "$URL" ]; then
+            echo "Searching k2-fsa/sherpa-onnx releases for the plain Android AAR ..."
+            for PAGE in 1 2 3; do
+              curl -fsSL \
+                -H "Authorization: Bearer $GH_TOKEN" \
+                -H "Accept: application/vnd.github+json" \
+                "https://api.github.com/repos/k2-fsa/sherpa-onnx/releases?per_page=100&page=$PAGE" \
+                | jq -r '.[].assets[]?.browser_download_url' >> "$ASSET_FILE" || true
+              if grep -qi '[.]aar$' "$ASSET_FILE"; then break; fi
+            done
+
+            # awk reads the file directly and exits on the first hit, so there is no
+            # upstream writer to be killed by SIGPIPE (the "Broken pipe" noise a
+            # printf | grep | head chain produced).
+            pick() {
+              awk -v pat="$1" '
+                tolower($0) ~ pat &&
+                tolower($0) !~ /rknn|gpu|cuda|debug|dbg|sources|javadoc/ { print; exit }
+              ' "$ASSET_FILE"
+            }
+
+            URL=$(pick 'sherpa-onnx-[0-9][0-9.]*[.]aar$')
+            [ -z "$URL" ] && URL=$(pick 'android.*[.]aar$')
+            [ -z "$URL" ] && URL=$(pick '[.]aar$')
+          fi
+
+          if [ -z "$URL" ]; then
+            echo "::error::Could not find a Sherpa-ONNX Android AAR automatically."
+            echo "Candidate assets seen:"
+            grep -i '[.]aar$' "$ASSET_FILE" | head -n 20 || echo "(none)"
+            echo "Open https://github.com/k2-fsa/sherpa-onnx/releases, copy the direct link to"
+            echo "the plain Android .aar asset, then re-run this workflow and paste it into the"
+            echo "'sherpa_aar_url' input. Do not substitute a guessed Maven coordinate."
+            exit 1
+          fi
+
+          echo "Using AAR: $URL"
+          curl -fL --retry 5 --retry-delay 3 -o app/libs/sherpa-onnx-android.aar "$URL"
+
+          SIZE=$(stat -c%s app/libs/sherpa-onnx-android.aar)
+          echo "AAR = $SIZE bytes"
+          if [ "$SIZE" -lt 1000000 ]; then
+            echo "::error::AAR is only $SIZE bytes - not a real library."
+            exit 1
+          fi
+
+          echo "--- AAR contents (filtered) ---"
+          unzip -l app/libs/sherpa-onnx-android.aar | grep -Ei 'classes.jar|arm64-v8a|armeabi-v7a' || true
+
+          if ! unzip -l app/libs/sherpa-onnx-android.aar | grep -q 'arm64-v8a'; then
+            echo "::error::AAR contains no arm64-v8a native libraries - wrong artifact."
+            exit 1
+          fi
+          if ! unzip -l app/libs/sherpa-onnx-android.aar | grep -q 'classes.jar'; then
+            echo "::error::AAR contains no classes.jar - the Kotlin API is missing."
+            exit 1
+          fi
+          if unzip -l app/libs/sherpa-onnx-android.aar | grep -q 'librknnrt'; then
+            echo "::notice::This AAR is a Rockchip (rknn) build. It works, but bundles ~8 MB per ABI of NPU libraries a phone never uses."
+          fi
+
+      # ----------------------------------------------------------------------------------
+      # 4. tesseract4android version. Published versions change and a hardcoded one goes
+      #    stale, so the latest release is read from Maven Central's own metadata instead
+      #    of being assumed. The concrete version is printed and passed to Gradle so the
+      #    build log always records exactly what was used.
+      # ----------------------------------------------------------------------------------
+      - name: Resolve tesseract4android version
+        run: |
+          set -euo pipefail
+
+          if [ -n "$TESSERACT_PIN" ]; then
+            echo "Using pinned version: $TESSERACT_PIN"
+            echo "TESS_VERSION=$TESSERACT_PIN" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+          # Tesseract4Android is NOT on Maven Central for current releases - it is
+          # published through JitPack (settings.gradle.kts adds that repository).
+          # Only 4.1.1a and older were ever mirrored to Central, which is why the
+          # Central metadata URL returns 404. Try JitPack first, then Central, and
+          # never fail the build here: gradle.properties holds a known-good pin.
+          JITPACK="https://jitpack.io/cz/adaptech/tesseract4android/tesseract4android/maven-metadata.xml"
+          CENTRAL="https://repo1.maven.org/maven2/cz/adaptech/tesseract4android/tesseract4android/maven-metadata.xml"
+
+          XML=""
+          for META in "$JITPACK" "$CENTRAL"; do
+            echo "Trying $META"
+            XML=$(curl -fsSL --retry 3 --retry-delay 2 "$META" || true)
+            if [ -n "$XML" ]; then echo "  -> readable"; break; fi
+            echo "  -> not available"
+          done
+
+          if [ -z "$XML" ]; then
+            echo "::notice::No version metadata reachable. Using the pinned version from gradle.properties."
+            exit 0
+          fi
+
+          echo "Published versions:"
+          printf '%s' "$XML" | grep -oP '(?<=<version>)[^<]+' | tr '\n' ' ' || true
+          echo
+
+          VER=$(printf '%s' "$XML" | grep -oP '(?<=<release>)[^<]+' | head -n1 || true)
+          [ -z "$VER" ] && VER=$(printf '%s' "$XML" | grep -oP '(?<=<latest>)[^<]+' | head -n1 || true)
+          [ -z "$VER" ] && VER=$(printf '%s' "$XML" | grep -oP '(?<=<version>)[^<]+' | tail -n1 || true)
+
+          if [ -z "$VER" ]; then
+            echo "::notice::Metadata had no usable version. Using the pinned version from gradle.properties."
+            exit 0
+          fi
+
+          echo "Resolved tesseract4android version: $VER"
+          echo "TESS_VERSION=$VER" >> "$GITHUB_ENV"
+
+      - name: Confirm no placeholders remain in the source tree
+        run: |
+          set -euo pipefail
+          FOUND=$(find app/src/main/assets app/libs -iname '*PUT_VOICE_MODEL_HERE*' -o -iname 'README.txt' | tr '\n' ' ')
+          if [ -n "$FOUND" ]; then
+            echo "::error::Placeholder files still present: $FOUND"
+            exit 1
+          fi
+          echo "Clean."
+
+      # ----------------------------------------------------------------------------------
+      # Build
+      # ----------------------------------------------------------------------------------
+      - name: Build debug APK
+        run: |
+          set -euo pipefail
+          ARGS=""
+          if [ -n "${TESS_VERSION:-}" ]; then ARGS="-PtesseractVersion=$TESS_VERSION"; fi
+          echo "Gradle args: $ARGS"
+          ./gradlew --no-daemon $ARGS assembleDebug
+
+      - name: Build release APK
+        run: |
+          set -euo pipefail
+          ARGS=""
+          if [ -n "${TESS_VERSION:-}" ]; then ARGS="-PtesseractVersion=$TESS_VERSION"; fi
+          ./gradlew --no-daemon $ARGS assembleRelease
+
+      - name: Sign release APK
+        run: |
+          set -euo pipefail
+          APK_IN=$(find app/build/outputs/apk/release -name '*.apk' | head -n1)
+          if [ -z "$APK_IN" ]; then
+            echo "::error::No release APK produced."
+            exit 1
+          fi
+
+          # Self-signed key, generated fresh each run. Fine for sideloading onto a phone.
+          # NOTE: a new key each run means Android treats it as a different app signature,
+          # so uninstall the previous build before installing a new one. For a stable key,
+          # commit a keystore as a base64 secret and decode it here instead.
+          keytool -genkeypair -v \
+            -keystore goya.jks \
+            -storepass goyabuild -keypass goyabuild \
+            -alias goya -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=Goya, OU=Build, O=Goya, L=NA, S=NA, C=NA"
+
+          APKSIGNER="$ANDROID_SDK_ROOT/build-tools/$BUILD_TOOLS/apksigner"
+          "$APKSIGNER" sign \
+            --ks goya.jks --ks-pass pass:goyabuild --key-pass pass:goyabuild \
+            --out goya-release-signed.apk "$APK_IN"
+          "$APKSIGNER" verify --print-certs goya-release-signed.apk
+
+      # ----------------------------------------------------------------------------------
+      # Verification gate. Gradle succeeds happily with the models missing; this is the
+      # only step that proves the app will actually speak on a phone.
+      # ----------------------------------------------------------------------------------
+      - name: Verify models are inside the APK
+        run: |
+          set -uo pipefail
+          APK=goya-release-signed.apk
+          FAIL=0
+
+          echo "=== models ==="
+          unzip -l "$APK" | grep -Ei 'traineddata|[.]onnx|espeak|lexicon' || true
+
+          unzip -l "$APK" | grep -q 'fas.traineddata' \
+            || { echo "::error::fas.traineddata is NOT in the APK - OCR would be dead."; FAIL=1; }
+
+          unzip -l "$APK" | grep -qi '[.]onnx' \
+            || { echo "::error::No .onnx voice in the APK - the app would be silent."; FAIL=1; }
+
+          if ! unzip -l "$APK" | grep -qi 'espeak' && ! unzip -l "$APK" | grep -qi 'lexicon.txt'; then
+            echo "::error::No phonemiser data in the APK - the voice cannot read Persian."
+            FAIL=1
+          fi
+
+          echo "=== native libs ==="
+          unzip -l "$APK" | grep 'lib/arm64-v8a' || true
+          unzip -l "$APK" | grep -q 'lib/arm64-v8a' \
+            || { echo "::error::No arm64-v8a native libraries in the APK."; FAIL=1; }
+
+          echo "=== placeholders (must be empty) ==="
+          if unzip -l "$APK" | grep -Ei 'PUT_VOICE_MODEL_HERE|assets/.*README.txt'; then
+            echo "::error::Placeholder files shipped instead of models."
+            FAIL=1
+          fi
+
+          SIZE=$(stat -c%s "$APK")
+          MB=$((SIZE / 1024 / 1024))
+          echo "=== APK size: ${MB} MB ==="
+          # The floor only needs to catch a missing voice model. Voice sizes vary a lot
+          # between Piper and MMS builds, so keep the hard limit generous and merely note
+          # anything unexpectedly small rather than failing a legitimate build.
+          if [ "$MB" -lt 25 ]; then
+            echo "::error::APK is only ${MB} MB - the voice model is almost certainly missing."
+            FAIL=1
+          elif [ "$MB" -lt 50 ]; then
+            echo "::notice::APK is ${MB} MB, smaller than typical. Confirm the voice files listed above look complete."
+          fi
+
+          [ "$FAIL" -eq 0 ] || exit 1
+          echo "All checks passed. The APK contains the offline OCR and voice models."
+
+      - name: Upload signed APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: goya-apk
+          path: |
+            goya-release-signed.apk
+            app/build/outputs/apk/debug/*.apk
+          retention-days: 30
+          if-no-files-found: error
